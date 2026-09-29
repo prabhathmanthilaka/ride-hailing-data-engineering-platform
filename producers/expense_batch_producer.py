@@ -3,11 +3,12 @@ import json
 import os
 import random
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from kafka import KafkaProducer
+
+from simulation_clock import SimulationClock
 
 
 load_dotenv()
@@ -23,20 +24,35 @@ TOPIC = os.getenv(
     "vehicle_expenses",
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = (
+    Path(__file__).resolve().parent.parent
+)
 
-INCOMING_DIR = PROJECT_ROOT / "data" / "incoming"
+INCOMING_DIR = (
+    PROJECT_ROOT
+    / "data"
+    / "incoming"
+)
 
-CSV_FILE = INCOMING_DIR / "vehicle_expenses.csv"
+CSV_FILE = (
+    INCOMING_DIR
+    / "vehicle_expenses.csv"
+)
 
 VEHICLE_COUNT = 25
 
 
 def create_producer() -> KafkaProducer:
+
+
     return KafkaProducer(
         bootstrap_servers=BOOTSTRAP_SERVERS,
-        key_serializer=lambda key: key.encode("utf-8"),
-        value_serializer=lambda value: json.dumps(value).encode(
+        key_serializer=lambda key: key.encode(
+            "utf-8"
+        ),
+        value_serializer=lambda value: json.dumps(
+            value
+        ).encode(
             "utf-8"
         ),
         acks="all",
@@ -46,34 +62,58 @@ def create_producer() -> KafkaProducer:
 
 
 def generate_expense_records() -> list[dict]:
-    """
-    Generate one daily expense record for every vehicle.
-    """
+
+
+    clock = SimulationClock()
+
+    simulated_now = clock.now()
+
+    simulated_date = clock.date()
 
     records = []
 
-    for index in range(1, VEHICLE_COUNT + 1):
+    for index in range(
+        1,
+        VEHICLE_COUNT + 1,
+    ):
 
-        vehicle_id = f"VH-{index:03d}"
+        vehicle_id = (
+            f"VH-{index:03d}"
+        )
 
         distance = round(
-            random.uniform(80.0, 260.0),
+            random.uniform(
+                80.0,
+                260.0,
+            ),
             2,
         )
 
         fuel_cost = round(
-            distance * random.uniform(0.11, 0.18),
+            distance
+            * random.uniform(
+                0.11,
+                0.18,
+            ),
             2,
         )
 
-        # Most vehicles have no maintenance expense.
-        # A smaller proportion receive maintenance.
-        has_maintenance = random.random() < 0.20
 
-        maintenance_cost = round(
-            random.uniform(25.0, 150.0),
-            2,
-        ) if has_maintenance else 0.0
+        has_maintenance = (
+            random.random() < 0.20
+        )
+
+        maintenance_cost = (
+            round(
+                random.uniform(
+                    25.0,
+                    150.0,
+                ),
+                2,
+            )
+            if has_maintenance
+            else 0.0
+        )
 
         service_flag = (
             "SERVICE_REQUIRED"
@@ -82,18 +122,21 @@ def generate_expense_records() -> list[dict]:
         )
 
         record = {
-            "expense_id": f"EXP-{uuid.uuid4().hex[:10].upper()}",
+            "expense_id": (
+                f"EXP-"
+                f"{uuid.uuid4().hex[:10].upper()}"
+            ),
             "vehicle_id": vehicle_id,
             "fuel_cost": fuel_cost,
             "maintenance_cost": maintenance_cost,
             "distance_covered": distance,
             "service_flag": service_flag,
-            "expense_date": datetime.now(
-                timezone.utc
-            ).date().isoformat(),
-            "generated_at": datetime.now(
-                timezone.utc
-            ).isoformat(),
+            "expense_date": (
+                simulated_date.isoformat()
+            ),
+            "generated_at": (
+                simulated_now.isoformat()
+            ),
         }
 
         records.append(record)
@@ -101,7 +144,11 @@ def generate_expense_records() -> list[dict]:
     return records
 
 
-def write_csv(records: list[dict]) -> None:
+def write_csv(
+    records: list[dict],
+) -> None:
+
+
     INCOMING_DIR.mkdir(
         parents=True,
         exist_ok=True,
@@ -130,7 +177,10 @@ def write_csv(records: list[dict]) -> None:
         )
 
         writer.writeheader()
-        writer.writerows(records)
+
+        writer.writerows(
+            records
+        )
 
 
 def publish_to_kafka(
@@ -138,11 +188,14 @@ def publish_to_kafka(
     records: list[dict],
 ) -> None:
 
+
     for record in records:
 
         producer.send(
             TOPIC,
-            key=record["vehicle_id"],
+            key=record[
+                "vehicle_id"
+            ],
             value=record,
         )
 
@@ -152,22 +205,50 @@ def publish_to_kafka(
 def main():
 
     print("=" * 70)
-    print("Ride-Hailing Daily Expense Batch Producer")
+    print(
+        "Ride-Hailing Daily Expense Batch Producer"
+    )
     print("=" * 70)
 
-    print(f"Kafka: {BOOTSTRAP_SERVERS}")
-    print(f"Topic: {TOPIC}")
-    print(f"CSV:   {CSV_FILE}")
-    print(f"Vehicles: {VEHICLE_COUNT}")
+    print(
+        f"Kafka: {BOOTSTRAP_SERVERS}"
+    )
+
+    print(
+        f"Topic: {TOPIC}"
+    )
+
+    print(
+        f"CSV:   {CSV_FILE}"
+    )
+
+    print(
+        f"Vehicles: {VEHICLE_COUNT}"
+    )
+
+    clock = SimulationClock()
+
+    print(
+        f"Simulated date: "
+        f"{clock.date().isoformat()}"
+    )
+
+    print(
+        f"Simulated timestamp: "
+        f"{clock.now().isoformat()}"
+    )
 
     print("=" * 70)
 
-    records = generate_expense_records()
+    records = (
+        generate_expense_records()
+    )
 
     write_csv(records)
 
     print(
-        f"Generated {len(records)} daily expense records."
+        f"Generated {len(records)} "
+        f"daily expense records."
     )
 
     producer = create_producer()
@@ -180,15 +261,18 @@ def main():
         )
 
         print(
-            f"Published {len(records)} records "
-            f"to Kafka topic '{TOPIC}'."
+            f"Published {len(records)} "
+            f"records to Kafka topic "
+            f"'{TOPIC}'."
         )
 
     finally:
 
         producer.close()
 
-    print(f"CSV written to: {CSV_FILE}")
+    print(
+        f"CSV written to: {CSV_FILE}"
+    )
 
 
 if __name__ == "__main__":
