@@ -1,5 +1,33 @@
 services:
 
+  airflow:
+    build:
+      context: ./airflow
+    container_name: ride-airflow
+    restart: unless-stopped
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_EXPENSE_TOPIC: vehicle_expenses
+
+      SIMULATED_DAY_MINUTES: ${SIMULATED_DAY_MINUTES:-5}
+      SIMULATION_START_DATE: ${SIMULATION_START_DATE:-2026-09-28T00:00:00+00:00}
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./:/opt/project
+
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
   postgres:
     image: postgres:16
     container_name: ride-postgres

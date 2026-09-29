@@ -2,13 +2,12 @@ import csv
 import json
 import os
 import random
-import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
-from simulation_clock import SimulationClock
+from producers.simulation_clock import SimulationClock
 
 
 load_dotenv()
@@ -44,7 +43,6 @@ VEHICLE_COUNT = 25
 
 def create_producer() -> KafkaProducer:
 
-
     return KafkaProducer(
         bootstrap_servers=BOOTSTRAP_SERVERS,
         key_serializer=lambda key: key.encode(
@@ -61,14 +59,20 @@ def create_producer() -> KafkaProducer:
     )
 
 
-def generate_expense_records() -> list[dict]:
-
-
-    clock = SimulationClock()
+def generate_expense_records(
+    clock: SimulationClock | None = None,
+) -> list[dict]:
+  
+    if clock is None:
+        clock = SimulationClock()
 
     simulated_now = clock.now()
 
-    simulated_date = clock.date()
+    simulated_now = simulated_now.replace(
+        microsecond=0
+    )
+
+    simulated_date = simulated_now.date()
 
     records = []
 
@@ -81,31 +85,51 @@ def generate_expense_records() -> list[dict]:
             f"VH-{index:03d}"
         )
 
+        seed = (
+            f"{simulated_date.isoformat()}"
+            f":{vehicle_id}"
+        )
+
+        rng = random.Random(seed)
+
+        expense_id = (
+            f"EXP-"
+            f"{simulated_date.isoformat()}-"
+            f"{vehicle_id}"
+        )
+
+        # Simulated daily distance.
+
         distance = round(
-            random.uniform(
+            rng.uniform(
                 80.0,
                 260.0,
             ),
             2,
         )
 
+        # Fuel cost based on distance and a deterministic
+        # simulated fuel rate.
+
         fuel_cost = round(
             distance
-            * random.uniform(
+            * rng.uniform(
                 0.11,
                 0.18,
             ),
             2,
         )
 
+        # Approximately 20% of vehicles receive a
+        # maintenance event.
 
         has_maintenance = (
-            random.random() < 0.20
+            rng.random() < 0.20
         )
 
         maintenance_cost = (
             round(
-                random.uniform(
+                rng.uniform(
                     25.0,
                     150.0,
                 ),
@@ -122,10 +146,7 @@ def generate_expense_records() -> list[dict]:
         )
 
         record = {
-            "expense_id": (
-                f"EXP-"
-                f"{uuid.uuid4().hex[:10].upper()}"
-            ),
+            "expense_id": expense_id,
             "vehicle_id": vehicle_id,
             "fuel_cost": fuel_cost,
             "maintenance_cost": maintenance_cost,
@@ -188,14 +209,11 @@ def publish_to_kafka(
     records: list[dict],
 ) -> None:
 
-
     for record in records:
 
         producer.send(
             TOPIC,
-            key=record[
-                "vehicle_id"
-            ],
+            key=record["vehicle_id"],
             value=record,
         )
 
@@ -205,9 +223,11 @@ def publish_to_kafka(
 def main():
 
     print("=" * 70)
+
     print(
         "Ride-Hailing Daily Expense Batch Producer"
     )
+
     print("=" * 70)
 
     print(
@@ -240,11 +260,13 @@ def main():
 
     print("=" * 70)
 
-    records = (
-        generate_expense_records()
+    records = generate_expense_records(
+        clock=clock
     )
 
-    write_csv(records)
+    write_csv(
+        records
+    )
 
     print(
         f"Generated {len(records)} "
@@ -272,6 +294,13 @@ def main():
 
     print(
         f"CSV written to: {CSV_FILE}"
+    )
+
+    print(
+        f"Batch contains "
+        f"{len(records)} records "
+        f"for simulated date "
+        f"{records[0]['expense_date']}."
     )
 
 
