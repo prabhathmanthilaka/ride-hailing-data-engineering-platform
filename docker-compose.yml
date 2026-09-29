@@ -193,6 +193,7 @@ services:
 
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
 
     depends_on:
       postgres:

@@ -1,18 +1,6 @@
-import os
-import psycopg2
-
 from datetime import datetime, timezone
-from time import perf_counter
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    Counter,
-    Gauge,
-    Histogram,
-    generate_latest,
-)
+from fastapi import FastAPI, HTTPException, Query
 
 from database import fetch_all, fetch_one
 from models import (
@@ -32,101 +20,6 @@ app = FastAPI(
 )
 
 
-# ---------------------------------------------------------------------------
-# Prometheus metrics
-# ---------------------------------------------------------------------------
-
-API_REQUESTS_TOTAL = Counter(
-    "ride_api_requests_total",
-    "Total number of API requests.",
-    ["method", "endpoint", "status"],
-)
-
-API_REQUEST_DURATION = Histogram(
-    "ride_api_request_duration_seconds",
-    "API request processing duration in seconds.",
-    ["method", "endpoint"],
-)
-
-API_HEALTH_STATUS = Gauge(
-    "ride_api_health_status",
-    "API health status. 1 means healthy, 0 means unhealthy.",
-)
-
-DATABASE_HEALTH_STATUS = Gauge(
-    "ride_api_database_status",
-    "Database connectivity status. 1 means healthy, 0 means unhealthy.",
-)
-
-@app.on_event("startup")
-def initialize_health_metrics():
-    """
-    Initialize health metrics when the API process starts.
-
-    The API itself is considered healthy once FastAPI starts successfully.
-    PostgreSQL connectivity is checked separately so a database failure
-    produces a DatabaseUnavailable alert rather than a false API-down state.
-    """
-    API_HEALTH_STATUS.set(1)
-
-    try:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            port=os.getenv("POSTGRES_PORT", "5432"),
-            dbname=os.getenv("POSTGRES_DB", "ride_hailing"),
-            user=os.getenv("POSTGRES_USER", "ride_admin"),
-            password=os.getenv("POSTGRES_PASSWORD", "ride_password"),
-            connect_timeout=5,
-        )
-        conn.close()
-        DATABASE_HEALTH_STATUS.set(1)
-    except Exception:
-        DATABASE_HEALTH_STATUS.set(0)
-
-# ---------------------------------------------------------------------------
-# Request instrumentation
-# ---------------------------------------------------------------------------
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    start_time = perf_counter()
-
-    response = await call_next(request)
-
-    duration = perf_counter() - start_time
-
-    endpoint = request.url.path
-
-    API_REQUESTS_TOTAL.labels(
-        method=request.method,
-        endpoint=endpoint,
-        status=str(response.status_code),
-    ).inc()
-
-    API_REQUEST_DURATION.labels(
-        method=request.method,
-        endpoint=endpoint,
-    ).observe(duration)
-
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Prometheus metrics endpoint
-# ---------------------------------------------------------------------------
-
-@app.get("/metrics", include_in_schema=False)
-def metrics():
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Health endpoint
-# ---------------------------------------------------------------------------
-
 @app.get("/health", response_model=HealthResponse)
 def health():
     try:
@@ -136,11 +29,6 @@ def health():
             "healthy" if result["health"] == 1 else "unhealthy"
         )
 
-        API_HEALTH_STATUS.set(1)
-        DATABASE_HEALTH_STATUS.set(
-            1 if database_status == "healthy" else 0
-        )
-
         return HealthResponse(
             status="healthy",
             database=database_status,
@@ -148,18 +36,11 @@ def health():
         )
 
     except Exception as exc:
-        API_HEALTH_STATUS.set(0)
-        DATABASE_HEALTH_STATUS.set(0)
-
         raise HTTPException(
             status_code=503,
             detail=f"Database health check failed: {exc}",
         )
 
-
-# ---------------------------------------------------------------------------
-# Fleet utilization
-# ---------------------------------------------------------------------------
 
 @app.get(
     "/fleet/utilization",
@@ -201,10 +82,6 @@ def fleet_utilization(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Fleet earnings
-# ---------------------------------------------------------------------------
-
 @app.get("/fleet/earnings")
 def fleet_earnings(
     limit: int = Query(default=20, ge=1, le=500),
@@ -224,10 +101,6 @@ def fleet_earnings(
 
     return fetch_all(query, (limit,))
 
-
-# ---------------------------------------------------------------------------
-# Vehicle profitability
-# ---------------------------------------------------------------------------
 
 @app.get(
     "/vehicles/profitability",
@@ -307,10 +180,6 @@ def vehicle_profitability(
         for row in rows
     ]
 
-
-# ---------------------------------------------------------------------------
-# Fleet alerts
-# ---------------------------------------------------------------------------
 
 @app.get("/alerts")
 def alerts():

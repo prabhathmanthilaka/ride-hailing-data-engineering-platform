@@ -1,6 +1,3 @@
-import os
-import psycopg2
-
 from datetime import datetime, timezone
 from time import perf_counter
 
@@ -58,30 +55,6 @@ DATABASE_HEALTH_STATUS = Gauge(
     "Database connectivity status. 1 means healthy, 0 means unhealthy.",
 )
 
-@app.on_event("startup")
-def initialize_health_metrics():
-    """
-    Initialize health metrics when the API process starts.
-
-    The API itself is considered healthy once FastAPI starts successfully.
-    PostgreSQL connectivity is checked separately so a database failure
-    produces a DatabaseUnavailable alert rather than a false API-down state.
-    """
-    API_HEALTH_STATUS.set(1)
-
-    try:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            port=os.getenv("POSTGRES_PORT", "5432"),
-            dbname=os.getenv("POSTGRES_DB", "ride_hailing"),
-            user=os.getenv("POSTGRES_USER", "ride_admin"),
-            password=os.getenv("POSTGRES_PASSWORD", "ride_password"),
-            connect_timeout=5,
-        )
-        conn.close()
-        DATABASE_HEALTH_STATUS.set(1)
-    except Exception:
-        DATABASE_HEALTH_STATUS.set(0)
 
 # ---------------------------------------------------------------------------
 # Request instrumentation

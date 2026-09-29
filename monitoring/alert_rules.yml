@@ -1,0 +1,34 @@
+groups:
+  - name: ride-hailing-api-health
+    interval: 5s
+    rules:
+
+      - alert: APIHealthDown
+        expr: ride_api_health_status == 0
+        for: 15s
+        labels:
+          severity: critical
+          service: ride-api
+        annotations:
+          summary: "Ride API health check failed"
+          description: "The Ride-Hailing FastAPI service reports an unhealthy state."
+
+      - alert: DatabaseUnavailable
+        expr: ride_api_database_status == 0
+        for: 15s
+        labels:
+          severity: critical
+          service: ride-api
+        annotations:
+          summary: "Ride API database unavailable"
+          description: "The Ride-Hailing API cannot currently reach PostgreSQL."
+
+      - alert: APIDown
+        expr: up{job="ride-api"} == 0
+        for: 15s
+        labels:
+          severity: critical
+          service: ride-api
+        annotations:
+          summary: "Ride API scrape target is down"
+          description: "Prometheus cannot scrape the Ride-Hailing API metrics endpoint."
