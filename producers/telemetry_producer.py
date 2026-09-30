@@ -38,7 +38,19 @@ INTERVAL_SECONDS = float(
 )
 
 
-# Colombo-centered simulation area.
+LONG_IDLE_PROBABILITY = float(
+    os.getenv(
+        "LONG_IDLE_PROBABILITY",
+        "0.02",
+    )
+)
+
+# extended idle length in producer events (20-40 events of 3 s
+# real = 1-2 real minutes = ~4.8-9.6 simulated hours).
+LONG_IDLE_EVENTS = (20, 40)
+
+
+# Colombo-centered simulation area
 BASE_LATITUDE = 6.9271
 BASE_LONGITUDE = 79.8612
 
@@ -63,6 +75,7 @@ class VehicleState:
     trip_id: str | None
     trip_age: int
     idle_age: int
+    extended_idle: int = 0
 
 
 class FleetSimulator:
@@ -123,7 +136,6 @@ class FleetSimulator:
                 55.0,
             )
 
-        # Convert the real producer interval into simulated hours.
         simulated_hours = (
             INTERVAL_SECONDS
             * SIMULATED_SECONDS_PER_REAL_SECOND
@@ -162,7 +174,7 @@ class FleetSimulator:
         vehicle.latitude += latitude_delta
         vehicle.longitude += longitude_delta
 
-        # Keep vehicles inside the synthetic Colombo operating area.
+        # Keep vehicles inside the synthetic Colombo operating area
         vehicle.latitude = max(
             BASE_LATITUDE - ZONE_RADIUS,
             min(
@@ -189,8 +201,10 @@ class FleetSimulator:
             vehicle.idle_age += 1
             vehicle.trip_age = 0
 
-            # Vehicles normally become available for a new trip
-            # after spending some time idle.
+            if vehicle.extended_idle > 0:
+                vehicle.extended_idle -= 1
+                return
+
             if vehicle.idle_age >= random.randint(2, 8):
                 vehicle.status = "enroute"
 
@@ -205,7 +219,7 @@ class FleetSimulator:
         elif vehicle.status == "enroute":
             vehicle.trip_age += 1
 
-            # Driver reaches pickup location.
+            # Driver reaches pickup location
             if vehicle.trip_age >= random.randint(1, 3):
                 vehicle.status = "on_trip"
 
@@ -218,13 +232,25 @@ class FleetSimulator:
                 2.5,
             )
 
-            # Complete trip after a realistic number of events.
+            # Complete trip after a realistic number of events
             if vehicle.trip_age >= random.randint(5, 15):
                 vehicle.status = "idle"
                 vehicle.trip_id = None
                 vehicle.trip_age = 0
                 vehicle.idle_age = 0
                 vehicle.speed = 0.0
+
+                # occasionally the driver goes on an extended idle
+                if random.random() < LONG_IDLE_PROBABILITY:
+                    vehicle.extended_idle = random.randint(
+                        *LONG_IDLE_EVENTS
+                    )
+
+                    print(
+                        f"LONG_IDLE_START "
+                        f"vehicle={vehicle.vehicle_id} "
+                        f"events={vehicle.extended_idle}"
+                    )
 
     def generate_events(self) -> list[dict]:
 
@@ -339,6 +365,12 @@ def main():
 
     print(
         "Fleet size: 25 vehicles"
+    )
+
+    # NEW
+    print(
+        f"Long idle probability: "
+        f"{LONG_IDLE_PROBABILITY:.0%} per completed trip"
     )
 
     print("=" * 70)

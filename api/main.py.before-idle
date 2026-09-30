@@ -145,59 +145,6 @@ PROFITABILITY_STATUSES = (
 
 
 # ============================================================
-# IDLE VEHICLE METRICS (THRESHOLD-BASED IDLE ALERT)
-# ============================================================
-
-# A vehicle idle for longer than this many SIMULATED minutes is
-# considered "idle for too long". Normal idle periods last at most
-# ~2 simulated hours, so 3 hours only flags genuine extended idles.
-IDLE_ALERT_MINUTES = float(
-    os.getenv("IDLE_ALERT_MINUTES", "180")
-)
-
-VEHICLE_IDLE_MINUTES = Gauge(
-    "ride_vehicle_idle_minutes",
-    "Simulated minutes the vehicle has been continuously idle (0 when active).",
-    ["vehicle_id", "zone"],
-)
-
-VEHICLES_IDLE_TOO_LONG = Gauge(
-    "ride_vehicles_idle_too_long",
-    "Number of vehicles idle for longer than the idle alert threshold.",
-)
-
-IDLE_ALERT_THRESHOLD = Gauge(
-    "ride_idle_alert_threshold_minutes",
-    "Configured idle alert threshold in simulated minutes.",
-)
-
-IDLE_ALERT_THRESHOLD.set(IDLE_ALERT_MINUTES)
-
-
-# ============================================================
-# PIPELINE FRESHNESS METRICS (NO-DATA / STALE-DATA ALERTS)
-# ============================================================
-
-# All ages are REAL seconds, measured with the database clock
-# (processed_at / calculated_at are set by PostgreSQL on insert).
-
-TELEMETRY_LAST_EVENT_AGE = Gauge(
-    "ride_telemetry_last_event_age_seconds",
-    "Real seconds since the latest telemetry event was stored by Spark.",
-)
-
-TELEMETRY_EVENTS_LAST_MINUTE = Gauge(
-    "ride_telemetry_events_last_minute",
-    "Telemetry events stored in PostgreSQL during the last real minute.",
-)
-
-PROFITABILITY_LAST_RUN_AGE = Gauge(
-    "ride_profitability_last_run_age_seconds",
-    "Real seconds since the Airflow reconciliation last wrote results.",
-)
-
-
-# ============================================================
 # SHARED SQL: FINAL FARE PER TRIP
 # ============================================================
 
@@ -221,53 +168,6 @@ TRIP_FINAL_FARE_CTE = """
             fare DESC,
             event_timestamp DESC
     )
-"""
-
-
-# ============================================================
-# SHARED SQL: CURRENT IDLE DURATION PER VEHICLE
-# ============================================================
-
-# For each vehicle: its latest state and, if it is idle, how long it
-# has been idle = latest event time - last time it was NOT idle.
-# Times are simulated (event_timestamp), so minutes are simulated.
-VEHICLE_IDLE_SQL = """
-    WITH latest AS (
-        SELECT DISTINCT ON (vehicle_id)
-            vehicle_id,
-            zone,
-            status,
-            event_timestamp
-        FROM telemetry_events
-        ORDER BY vehicle_id, event_timestamp DESC
-    ),
-
-    last_active AS (
-        SELECT
-            vehicle_id,
-            MAX(event_timestamp) AS last_active_at
-        FROM telemetry_events
-        WHERE status <> 'idle'
-        GROUP BY vehicle_id
-    )
-
-    SELECT
-        l.vehicle_id,
-        l.zone,
-        l.status,
-        l.event_timestamp AS last_seen_at,
-        a.last_active_at,
-        CASE
-            WHEN l.status = 'idle' AND a.last_active_at IS NOT NULL
-            THEN EXTRACT(
-                EPOCH FROM l.event_timestamp - a.last_active_at
-            ) / 60.0
-            ELSE 0
-        END AS idle_minutes
-    FROM latest l
-    LEFT JOIN last_active a
-        ON a.vehicle_id = l.vehicle_id
-    ORDER BY idle_minutes DESC, l.vehicle_id;
 """
 
 
@@ -591,119 +491,6 @@ def update_profitability_prometheus_metrics():
     except Exception as exc:
         print(
             f"PROFITABILITY_METRICS_UPDATE_ERROR error={exc}"
-        )
-
-    finally:
-        if conn:
-            conn.close()
-
-
-# ============================================================
-# IDLE VEHICLE PROMETHEUS METRIC REFRESH
-# ============================================================
-
-def update_idle_prometheus_metrics():
-    """
-    Refresh per-vehicle idle duration gauges and the number of
-    vehicles idle for longer than IDLE_ALERT_MINUTES.
-    """
-
-    conn = None
-
-    try:
-        conn = get_connection()
-
-        with conn.cursor() as cursor:
-            cursor.execute(VEHICLE_IDLE_SQL)
-            rows = cursor.fetchall()
-
-        # Zone labels change as vehicles move, so drop old series.
-        VEHICLE_IDLE_MINUTES.clear()
-
-        too_long = 0
-
-        for vehicle_id, zone, _status, _seen, _active, idle_minutes in rows:
-
-            idle_minutes = float(idle_minutes or 0)
-
-            VEHICLE_IDLE_MINUTES.labels(
-                vehicle_id=vehicle_id,
-                zone=zone or "unknown",
-            ).set(idle_minutes)
-
-            if idle_minutes > IDLE_ALERT_MINUTES:
-                too_long += 1
-
-        VEHICLES_IDLE_TOO_LONG.set(too_long)
-
-    except Exception as exc:
-        print(
-            f"IDLE_METRICS_UPDATE_ERROR error={exc}"
-        )
-
-    finally:
-        if conn:
-            conn.close()
-
-
-# ============================================================
-# PIPELINE FRESHNESS PROMETHEUS METRIC REFRESH
-# ============================================================
-
-def update_freshness_prometheus_metrics():
-    """
-    Refresh data-freshness gauges used by the "no data received"
-    and "stale daily report" alerts.
-
-    If a table has no rows yet, the age is +Inf so that the
-    corresponding alert fires (no data at all = stale).
-    """
-
-    conn = None
-
-    try:
-        conn = get_connection()
-
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    EXTRACT(EPOCH FROM now() - MAX(processed_at)),
-                    COUNT(*) FILTER (
-                        WHERE processed_at > now() - INTERVAL '60 seconds'
-                    )
-                FROM telemetry_events;
-                """
-            )
-
-            telemetry_age, events_last_minute = cursor.fetchone()
-
-            cursor.execute(
-                """
-                SELECT EXTRACT(EPOCH FROM now() - MAX(calculated_at))
-                FROM vehicle_profitability;
-                """
-            )
-
-            report_age = cursor.fetchone()[0]
-
-        TELEMETRY_LAST_EVENT_AGE.set(
-            float(telemetry_age)
-            if telemetry_age is not None
-            else float("inf")
-        )
-
-        TELEMETRY_EVENTS_LAST_MINUTE.set(events_last_minute or 0)
-
-        PROFITABILITY_LAST_RUN_AGE.set(
-            float(report_age)
-            if report_age is not None
-            else float("inf")
-        )
-
-    except Exception as exc:
-        print(
-            f"FRESHNESS_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -1099,62 +886,6 @@ def alerts():
 
 
 # ============================================================
-# IDLE VEHICLE ALERTS
-# ============================================================
-
-@app.get("/alerts/idle-vehicles")
-def idle_vehicle_alerts(
-    threshold_minutes: float = Query(
-        default=IDLE_ALERT_MINUTES,
-        ge=0,
-        description="Idle threshold in simulated minutes.",
-    )
-):
-    """
-    Threshold-based idle alert: vehicles that have been continuously
-    idle for longer than `threshold_minutes` (simulated minutes).
-    """
-
-    conn = None
-
-    try:
-        conn = get_connection()
-
-        with conn.cursor() as cursor:
-            cursor.execute(VEHICLE_IDLE_SQL)
-            rows = cursor.fetchall()
-
-        idle_vehicles = [
-            {
-                "vehicle_id": row[0],
-                "zone": row[1],
-                "status": row[2],
-                "last_seen_at": row[3],
-                "idle_since": row[4],
-                "idle_minutes": round(float(row[5] or 0), 1),
-            }
-            for row in rows
-            if float(row[5] or 0) > threshold_minutes
-        ]
-
-        return {
-            "threshold_minutes": threshold_minutes,
-            "vehicles_idle_too_long": len(idle_vehicles),
-            "vehicles": idle_vehicles,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        )
-
-    finally:
-        if conn:
-            conn.close()
-
-
-# ============================================================
 # DAILY PROFITABILITY REPORT
 # ============================================================
 
@@ -1283,8 +1014,6 @@ def metrics():
     update_fleet_prometheus_metrics()
     update_earnings_prometheus_metrics()
     update_profitability_prometheus_metrics()
-    update_idle_prometheus_metrics()
-    update_freshness_prometheus_metrics()
 
     return Response(
         content=generate_latest(),

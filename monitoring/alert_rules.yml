@@ -1,4 +1,9 @@
 groups:
+
+  # ============================================================
+  # PLATFORM HEALTH
+  # ============================================================
+
   - name: ride-hailing-api-health
     interval: 5s
     rules:
@@ -32,3 +37,87 @@ groups:
         annotations:
           summary: "Ride API scrape target is down"
           description: "Prometheus cannot scrape the Ride-Hailing API metrics endpoint."
+
+  # ============================================================
+  # PIPELINE FRESHNESS (NO DATA / STALE DATA)
+  # ============================================================
+
+  - name: ride-hailing-pipeline-freshness
+    interval: 5s
+    rules:
+
+      # Any break in producer -> Kafka -> Spark -> PostgreSQL stops
+      # new telemetry rows from arriving.
+      - alert: TelemetryDataStale
+        expr: ride_telemetry_last_event_age_seconds > 60
+        for: 30s
+        labels:
+          severity: critical
+          service: streaming-pipeline
+        annotations:
+          summary: "No telemetry received for over 1 minute"
+          description: "The last telemetry event was stored {{ $value | printf \"%.0f\" }} seconds ago. Check the producer, Kafka and Spark."
+
+      # The Airflow DAG runs every 5 real minutes (one simulated day).
+      # 15 minutes = three missed daily reconciliations.
+      - alert: ProfitabilityReportStale
+        expr: ride_profitability_last_run_age_seconds > 900
+        for: 1m
+        labels:
+          severity: warning
+          service: batch-pipeline
+        annotations:
+          summary: "Daily profitability reconciliation is stale"
+          description: "Airflow has not written profitability results for {{ $value | printf \"%.0f\" }} seconds (expected every 300 s)."
+
+  # ============================================================
+  # FLEET OPERATIONS (BUSINESS ALERTS)
+  # ============================================================
+
+  - name: ride-hailing-fleet-operations
+    interval: 5s
+    rules:
+
+      # Use case requirement: alert when a vehicle is idle for a long
+      # period. Minutes are SIMULATED minutes; normal idle periods
+      # last at most ~2 hours, so 3 hours flags extended idles only.
+      - alert: VehicleIdleTooLong
+        expr: ride_vehicle_idle_minutes > 180
+        for: 10s
+        labels:
+          severity: warning
+          service: fleet-operations
+        annotations:
+          summary: "Vehicle {{ $labels.vehicle_id }} idle for too long"
+          description: "{{ $labels.vehicle_id }} in {{ $labels.zone }} has been idle for {{ $value | printf \"%.0f\" }} simulated minutes (threshold 180). Consider dispatching it to a busier zone."
+
+      # Same business rule as the Fleet Idle Ratio panel (red > 60%).
+      - alert: FleetIdleRatioHigh
+        expr: 100 * sum(ride_fleet_idle_vehicles) / sum(ride_fleet_active_vehicles) > 60
+        for: 1m
+        labels:
+          severity: warning
+          service: fleet-operations
+        annotations:
+          summary: "More than 60% of the fleet is idle"
+          description: "Fleet idle ratio is {{ $value | printf \"%.0f\" }}%. Supply exceeds demand."
+
+      - alert: UnprofitableVehiclesHigh
+        expr: ride_vehicles_by_profitability_status{status="UNPROFITABLE"} >= 5
+        for: 10s
+        labels:
+          severity: warning
+          service: fleet-profitability
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} vehicles unprofitable on the latest day"
+          description: "At least 5 vehicles lost money on the latest reconciled day after fuel and maintenance costs. See /reports/daily/latest."
+
+      - alert: FleetDailyLoss
+        expr: (ride_fleet_daily_earnings - ride_fleet_daily_operating_cost) < 0
+        for: 10s
+        labels:
+          severity: critical
+          service: fleet-profitability
+        annotations:
+          summary: "Fleet made a loss on the latest reconciled day"
+          description: "Fleet profit on the latest reconciled day is {{ $value | printf \"%.2f\" }} USD."
