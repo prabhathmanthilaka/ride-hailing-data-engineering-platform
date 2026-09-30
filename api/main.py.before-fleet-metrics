@@ -1,0 +1,348 @@
+import os
+import psycopg2
+
+from datetime import datetime, timezone
+from time import perf_counter
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import Response
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+
+from database import fetch_all, fetch_one
+from models import (
+    FleetUtilizationResponse,
+    HealthResponse,
+    VehicleProfitabilityResponse,
+)
+
+
+app = FastAPI(
+    title="Ride-Hailing Fleet Operations API",
+    description=(
+        "Serving API for real-time fleet utilization, earnings, "
+        "and daily vehicle profitability."
+    ),
+    version="1.0.0",
+)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+
+API_REQUESTS_TOTAL = Counter(
+    "ride_api_requests_total",
+    "Total number of API requests.",
+    ["method", "endpoint", "status"],
+)
+
+API_REQUEST_DURATION = Histogram(
+    "ride_api_request_duration_seconds",
+    "API request processing duration in seconds.",
+    ["method", "endpoint"],
+)
+
+API_HEALTH_STATUS = Gauge(
+    "ride_api_health_status",
+    "API health status. 1 means healthy, 0 means unhealthy.",
+)
+
+DATABASE_HEALTH_STATUS = Gauge(
+    "ride_api_database_status",
+    "Database connectivity status. 1 means healthy, 0 means unhealthy.",
+)
+
+@app.on_event("startup")
+def initialize_health_metrics():
+    """
+    Initialize health metrics when the API process starts.
+
+    The API itself is considered healthy once FastAPI starts successfully.
+    PostgreSQL connectivity is checked separately so a database failure
+    produces a DatabaseUnavailable alert rather than a false API-down state.
+    """
+    API_HEALTH_STATUS.set(1)
+
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=os.getenv("POSTGRES_PORT", "5432"),
+            dbname=os.getenv("POSTGRES_DB", "ride_hailing"),
+            user=os.getenv("POSTGRES_USER", "ride_admin"),
+            password=os.getenv("POSTGRES_PASSWORD", "ride_password"),
+            connect_timeout=5,
+        )
+        conn.close()
+        DATABASE_HEALTH_STATUS.set(1)
+    except Exception:
+        DATABASE_HEALTH_STATUS.set(0)
+
+# ---------------------------------------------------------------------------
+# Request instrumentation
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    start_time = perf_counter()
+
+    response = await call_next(request)
+
+    duration = perf_counter() - start_time
+
+    endpoint = request.url.path
+
+    API_REQUESTS_TOTAL.labels(
+        method=request.method,
+        endpoint=endpoint,
+        status=str(response.status_code),
+    ).inc()
+
+    API_REQUEST_DURATION.labels(
+        method=request.method,
+        endpoint=endpoint,
+    ).observe(duration)
+
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/health", response_model=HealthResponse)
+def health():
+    try:
+        result = fetch_one("SELECT 1 AS health")
+
+        database_status = (
+            "healthy" if result["health"] == 1 else "unhealthy"
+        )
+
+        API_HEALTH_STATUS.set(1)
+        DATABASE_HEALTH_STATUS.set(
+            1 if database_status == "healthy" else 0
+        )
+
+        return HealthResponse(
+            status="healthy",
+            database=database_status,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    except Exception as exc:
+        API_HEALTH_STATUS.set(0)
+        DATABASE_HEALTH_STATUS.set(0)
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database health check failed: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fleet utilization
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/fleet/utilization",
+    response_model=list[FleetUtilizationResponse],
+)
+def fleet_utilization(
+    limit: int = Query(default=20, ge=1, le=500),
+):
+    query = """
+        SELECT
+            window_start,
+            window_end,
+            zone,
+            time_of_day,
+            active_vehicles,
+            idle_vehicles,
+            enroute_vehicles,
+            on_trip_vehicles,
+            CASE
+                WHEN active_vehicles > 0
+                THEN ROUND(
+                    idle_vehicles::numeric / active_vehicles,
+                    4
+                )
+                ELSE 0
+            END AS idle_ratio,
+            trips,
+            earnings
+        FROM fleet_metrics
+        ORDER BY window_start DESC, zone
+        LIMIT %s;
+    """
+
+    rows = fetch_all(query, (limit,))
+
+    return [
+        FleetUtilizationResponse(**dict(row))
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Fleet earnings
+# ---------------------------------------------------------------------------
+
+@app.get("/fleet/earnings")
+def fleet_earnings(
+    limit: int = Query(default=20, ge=1, le=500),
+):
+    query = """
+        SELECT
+            window_start,
+            window_end,
+            zone,
+            time_of_day,
+            trips,
+            ROUND(earnings::numeric, 2) AS earnings
+        FROM fleet_metrics
+        ORDER BY window_start DESC, earnings DESC
+        LIMIT %s;
+    """
+
+    return fetch_all(query, (limit,))
+
+
+# ---------------------------------------------------------------------------
+# Vehicle profitability
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/vehicles/profitability",
+    response_model=list[VehicleProfitabilityResponse],
+)
+def vehicle_profitability(
+    status: str | None = Query(
+        default=None,
+        description=(
+            "Filter by PROFITABLE, AT_RISK, or UNPROFITABLE"
+        ),
+    ),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    if status:
+        status = status.upper()
+
+        allowed_statuses = {
+            "PROFITABLE",
+            "AT_RISK",
+            "UNPROFITABLE",
+        }
+
+        if status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid status. Use PROFITABLE, AT_RISK, "
+                    "or UNPROFITABLE."
+                ),
+            )
+
+        query = """
+            SELECT
+                vehicle_id,
+                report_date,
+                earnings,
+                fuel_cost,
+                maintenance_cost,
+                operating_cost,
+                profit,
+                profit_margin,
+                distance_covered,
+                service_flag,
+                profitability_status
+            FROM vehicle_profitability
+            WHERE profitability_status = %s
+            ORDER BY profit ASC
+            LIMIT %s;
+        """
+
+        rows = fetch_all(query, (status, limit))
+
+    else:
+        query = """
+            SELECT
+                vehicle_id,
+                report_date,
+                earnings,
+                fuel_cost,
+                maintenance_cost,
+                operating_cost,
+                profit,
+                profit_margin,
+                distance_covered,
+                service_flag,
+                profitability_status
+            FROM vehicle_profitability
+            ORDER BY profit ASC
+            LIMIT %s;
+        """
+
+        rows = fetch_all(query, (limit,))
+
+    return [
+        VehicleProfitabilityResponse(**dict(row))
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Fleet alerts
+# ---------------------------------------------------------------------------
+
+@app.get("/alerts")
+def alerts():
+    query = """
+        SELECT
+            vehicle_id,
+            report_date,
+            service_flag,
+            profitability_status,
+            profit,
+            profit_margin
+        FROM vehicle_profitability
+        WHERE
+            service_flag = 'SERVICE_REQUIRED'
+            OR profitability_status IN (
+                'AT_RISK',
+                'UNPROFITABLE'
+            )
+        ORDER BY
+            CASE
+                WHEN profitability_status = 'UNPROFITABLE'
+                    THEN 1
+                WHEN profitability_status = 'AT_RISK'
+                    THEN 2
+                ELSE 3
+            END,
+            profit ASC;
+    """
+
+    rows = fetch_all(query)
+
+    return {
+        "count": len(rows),
+        "alerts": rows,
+    }

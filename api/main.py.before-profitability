@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timezone
 from time import perf_counter
 
 import psycopg2
@@ -92,55 +91,6 @@ FLEET_EARNINGS_TOTAL = Gauge(
     "ride_fleet_earnings_total",
     "Trip earnings by zone and time of day (final fare per trip).",
     ["zone", "time_of_day"],
-)
-
-
-# ============================================================
-# PROFITABILITY BUSINESS METRICS (LATEST RECONCILED DAY)
-# ============================================================
-
-VEHICLE_PROFIT = Gauge(
-    "ride_vehicle_profit",
-    "Vehicle profit (earnings - fuel - maintenance) for the latest reconciled day.",
-    ["vehicle_id"],
-)
-
-VEHICLE_PROFIT_MARGIN = Gauge(
-    "ride_vehicle_profit_margin",
-    "Vehicle profit margin in percent for the latest reconciled day.",
-    ["vehicle_id"],
-)
-
-VEHICLES_BY_PROFITABILITY_STATUS = Gauge(
-    "ride_vehicles_by_profitability_status",
-    "Number of vehicles per profitability status for the latest reconciled day.",
-    ["status"],
-)
-
-VEHICLES_SERVICE_REQUIRED = Gauge(
-    "ride_vehicles_service_required",
-    "Number of vehicles flagged SERVICE_REQUIRED on the latest reconciled day.",
-)
-
-FLEET_DAILY_EARNINGS = Gauge(
-    "ride_fleet_daily_earnings",
-    "Fleet earnings for the latest reconciled day.",
-)
-
-FLEET_DAILY_OPERATING_COST = Gauge(
-    "ride_fleet_daily_operating_cost",
-    "Fleet fuel + maintenance cost for the latest reconciled day.",
-)
-
-PROFITABILITY_REPORT_DATE = Gauge(
-    "ride_profitability_report_date_timestamp",
-    "Latest reconciled report date as a Unix timestamp.",
-)
-
-PROFITABILITY_STATUSES = (
-    "PROFITABLE",
-    "AT_RISK",
-    "UNPROFITABLE",
 )
 
 
@@ -382,115 +332,6 @@ def update_earnings_prometheus_metrics():
     except Exception as exc:
         print(
             f"EARNINGS_METRICS_UPDATE_ERROR error={exc}"
-        )
-
-    finally:
-        if conn:
-            conn.close()
-
-
-# ============================================================
-# PROFITABILITY PROMETHEUS METRIC REFRESH
-# ============================================================
-
-def update_profitability_prometheus_metrics():
-    """
-    Refresh profitability gauges from the most recent report date
-    in vehicle_profitability (written by the Airflow reconciliation).
-    """
-
-    conn = None
-
-    try:
-        conn = get_connection()
-
-        query = """
-            SELECT
-                vehicle_id,
-                report_date,
-                earnings,
-                operating_cost,
-                profit,
-                profit_margin,
-                service_flag,
-                profitability_status
-            FROM vehicle_profitability
-            WHERE report_date = (
-                SELECT MAX(report_date)
-                FROM vehicle_profitability
-            )
-            ORDER BY vehicle_id;
-        """
-
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-
-        VEHICLE_PROFIT.clear()
-        VEHICLE_PROFIT_MARGIN.clear()
-
-        status_counts = {
-            status: 0
-            for status in PROFITABILITY_STATUSES
-        }
-
-        service_required = 0
-        total_earnings = 0.0
-        total_operating_cost = 0.0
-
-        for (
-            vehicle_id,
-            report_date,
-            earnings,
-            operating_cost,
-            profit,
-            profit_margin,
-            service_flag,
-            status,
-        ) in rows:
-
-            VEHICLE_PROFIT.labels(
-                vehicle_id=vehicle_id
-            ).set(float(profit or 0))
-
-            if profit_margin is not None:
-                VEHICLE_PROFIT_MARGIN.labels(
-                    vehicle_id=vehicle_id
-                ).set(float(profit_margin))
-
-            status_counts[status] = (
-                status_counts.get(status, 0) + 1
-            )
-
-            if service_flag == "SERVICE_REQUIRED":
-                service_required += 1
-
-            total_earnings += float(earnings or 0)
-            total_operating_cost += float(operating_cost or 0)
-
-        for status, count in status_counts.items():
-            VEHICLES_BY_PROFITABILITY_STATUS.labels(
-                status=status
-            ).set(count)
-
-        VEHICLES_SERVICE_REQUIRED.set(service_required)
-        FLEET_DAILY_EARNINGS.set(total_earnings)
-        FLEET_DAILY_OPERATING_COST.set(total_operating_cost)
-
-        if rows:
-            report_date = rows[0][1]
-
-            PROFITABILITY_REPORT_DATE.set(
-                datetime.combine(
-                    report_date,
-                    datetime.min.time(),
-                    tzinfo=timezone.utc,
-                ).timestamp()
-            )
-
-    except Exception as exc:
-        print(
-            f"PROFITABILITY_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -886,116 +727,6 @@ def alerts():
 
 
 # ============================================================
-# DAILY PROFITABILITY REPORT
-# ============================================================
-
-@app.get("/reports/daily/latest")
-def latest_daily_report():
-    """
-    Consolidated daily profitability report for the most recently
-    reconciled simulated day: fleet totals, status breakdown and the
-    vehicles that became unprofitable once costs were applied.
-    """
-
-    conn = None
-
-    try:
-        conn = get_connection()
-
-        query = """
-            SELECT
-                vehicle_id,
-                report_date,
-                earnings,
-                operating_cost,
-                profit,
-                profit_margin,
-                service_flag,
-                profitability_status
-            FROM vehicle_profitability
-            WHERE report_date = (
-                SELECT MAX(report_date)
-                FROM vehicle_profitability
-            )
-            ORDER BY profit ASC;
-        """
-
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-
-        if not rows:
-            raise HTTPException(
-                status_code=404,
-                detail="No reconciled profitability report yet.",
-            )
-
-        status_counts = {
-            status: 0
-            for status in PROFITABILITY_STATUSES
-        }
-
-        vehicles = []
-
-        for row in rows:
-            status_counts[row[7]] = (
-                status_counts.get(row[7], 0) + 1
-            )
-
-            vehicles.append(
-                {
-                    "vehicle_id": row[0],
-                    "earnings": round(float(row[2] or 0), 2),
-                    "operating_cost": round(float(row[3] or 0), 2),
-                    "profit": round(float(row[4] or 0), 2),
-                    "profit_margin": (
-                        round(float(row[5]), 2)
-                        if row[5] is not None
-                        else None
-                    ),
-                    "service_flag": row[6],
-                    "profitability_status": row[7],
-                }
-            )
-
-        total_earnings = sum(v["earnings"] for v in vehicles)
-        total_cost = sum(v["operating_cost"] for v in vehicles)
-
-        return {
-            "report_date": rows[0][1],
-            "vehicles": len(vehicles),
-            "fleet_earnings": round(total_earnings, 2),
-            "fleet_operating_cost": round(total_cost, 2),
-            "fleet_profit": round(total_earnings - total_cost, 2),
-            "status_counts": status_counts,
-            "unprofitable_vehicles": [
-                v["vehicle_id"]
-                for v in vehicles
-                if v["profitability_status"] == "UNPROFITABLE"
-            ],
-            "at_risk_vehicles": [
-                v["vehicle_id"]
-                for v in vehicles
-                if v["profitability_status"] == "AT_RISK"
-            ],
-            "vehicles_detail": vehicles,
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        )
-
-    finally:
-        if conn:
-            conn.close()
-
-
-# ============================================================
 # PROMETHEUS METRICS ENDPOINT
 # ============================================================
 
@@ -1007,13 +738,12 @@ def metrics():
     """
     Prometheus scrape endpoint.
 
-    Before returning metrics, refresh the fleet state, earnings
-    and profitability business metrics from PostgreSQL.
+    Before returning metrics, refresh the fleet state and
+    earnings business metrics from PostgreSQL.
     """
 
     update_fleet_prometheus_metrics()
     update_earnings_prometheus_metrics()
-    update_profitability_prometheus_metrics()
 
     return Response(
         content=generate_latest(),

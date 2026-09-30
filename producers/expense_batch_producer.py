@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import random
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,12 +34,16 @@ INCOMING_DIR = (
     / "incoming"
 )
 
-CSV_FILE = (
-    INCOMING_DIR
-    / "vehicle_expenses.csv"
-)
-
 VEHICLE_COUNT = 25
+
+
+def csv_path_for(expense_date: date) -> Path:
+    """One file is dropped per simulated day."""
+
+    return (
+        INCOMING_DIR
+        / f"vehicle_expenses_{expense_date.isoformat()}.csv"
+    )
 
 
 def create_producer() -> KafkaProducer:
@@ -61,18 +66,15 @@ def create_producer() -> KafkaProducer:
 
 def generate_expense_records(
     clock: SimulationClock | None = None,
+    expense_date: date | None = None,
 ) -> list[dict]:
-  
-    if clock is None:
-        clock = SimulationClock()
 
-    simulated_now = clock.now()
+    if expense_date is None:
 
-    simulated_now = simulated_now.replace(
-        microsecond=0
-    )
+        if clock is None:
+            clock = SimulationClock()
 
-    simulated_date = simulated_now.date()
+        expense_date = clock.previous_date()
 
     records = []
 
@@ -86,7 +88,7 @@ def generate_expense_records(
         )
 
         seed = (
-            f"{simulated_date.isoformat()}"
+            f"{expense_date.isoformat()}"
             f":{vehicle_id}"
         )
 
@@ -94,11 +96,10 @@ def generate_expense_records(
 
         expense_id = (
             f"EXP-"
-            f"{simulated_date.isoformat()}-"
+            f"{expense_date.isoformat()}-"
             f"{vehicle_id}"
         )
 
-        # Simulated daily distance.
 
         distance = round(
             rng.uniform(
@@ -108,8 +109,6 @@ def generate_expense_records(
             2,
         )
 
-        # Fuel cost based on distance and a deterministic
-        # simulated fuel rate.
 
         fuel_cost = round(
             distance
@@ -153,10 +152,11 @@ def generate_expense_records(
             "distance_covered": distance,
             "service_flag": service_flag,
             "expense_date": (
-                simulated_date.isoformat()
+                expense_date.isoformat()
             ),
+            # Partners submit the file at the end of the reported day.
             "generated_at": (
-                simulated_now.isoformat()
+                f"{expense_date.isoformat()}T23:59:59+00:00"
             ),
         }
 
@@ -167,8 +167,7 @@ def generate_expense_records(
 
 def write_csv(
     records: list[dict],
-) -> None:
-
+) -> Path:
 
     INCOMING_DIR.mkdir(
         parents=True,
@@ -186,7 +185,13 @@ def write_csv(
         "generated_at",
     ]
 
-    with CSV_FILE.open(
+    csv_file = csv_path_for(
+        date.fromisoformat(
+            records[0]["expense_date"]
+        )
+    )
+
+    with csv_file.open(
         "w",
         newline="",
         encoding="utf-8",
@@ -202,6 +207,8 @@ def write_csv(
         writer.writerows(
             records
         )
+
+    return csv_file
 
 
 def publish_to_kafka(
@@ -230,6 +237,8 @@ def main():
 
     print("=" * 70)
 
+    clock = SimulationClock()
+
     print(
         f"Kafka: {BOOTSTRAP_SERVERS}"
     )
@@ -239,23 +248,17 @@ def main():
     )
 
     print(
-        f"CSV:   {CSV_FILE}"
-    )
-
-    print(
         f"Vehicles: {VEHICLE_COUNT}"
     )
 
-    clock = SimulationClock()
-
     print(
-        f"Simulated date: "
-        f"{clock.date().isoformat()}"
+        f"Simulated now: "
+        f"{clock.now().isoformat()}"
     )
 
     print(
-        f"Simulated timestamp: "
-        f"{clock.now().isoformat()}"
+        f"Expense date (yesterday): "
+        f"{clock.previous_date().isoformat()}"
     )
 
     print("=" * 70)
@@ -264,7 +267,7 @@ def main():
         clock=clock
     )
 
-    write_csv(
+    csv_file = write_csv(
         records
     )
 
@@ -293,14 +296,7 @@ def main():
         producer.close()
 
     print(
-        f"CSV written to: {CSV_FILE}"
-    )
-
-    print(
-        f"Batch contains "
-        f"{len(records)} records "
-        f"for simulated date "
-        f"{records[0]['expense_date']}."
+        f"CSV written to: {csv_file}"
     )
 
 

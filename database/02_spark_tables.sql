@@ -47,7 +47,10 @@ CREATE TABLE IF NOT EXISTS vehicle_expenses (
     distance_covered DOUBLE PRECISION NOT NULL,
     service_flag TEXT NOT NULL,
     expense_date DATE NOT NULL,
-    generated_at TIMESTAMPTZ
+    generated_at TIMESTAMPTZ,
+
+    -- Required by the Spark upsert: ON CONFLICT (vehicle_id, expense_date)
+    CONSTRAINT uq_vehicle_expense_day UNIQUE (vehicle_id, expense_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_expenses_vehicle_date

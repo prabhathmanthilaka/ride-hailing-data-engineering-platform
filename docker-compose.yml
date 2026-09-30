@@ -18,6 +18,13 @@ services:
       SIMULATED_DAY_MINUTES: ${SIMULATED_DAY_MINUTES:-5}
       SIMULATION_START_DATE: ${SIMULATION_START_DATE:-2026-09-28T00:00:00+00:00}
 
+      # PostgreSQL access for the profitability reconciliation tasks
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ride_hailing}
+      POSTGRES_USER: ${POSTGRES_USER:-ride_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ride_password}
+
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
@@ -27,6 +34,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16
@@ -43,7 +52,10 @@ services:
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Run on first start only (empty data volume), in name order
       - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./database/02_spark_tables.sql:/docker-entrypoint-initdb.d/02-spark-tables.sql:ro
+      - ./database/03_profitability.sql:/docker-entrypoint-initdb.d/03-profitability.sql:ro
 
     healthcheck:
       test:
@@ -54,9 +66,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-
-
 
   kafka:
     image: apache/kafka:3.9.1
@@ -209,6 +218,7 @@ services:
 
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
 
     depends_on:
       prometheus:
