@@ -142,6 +142,28 @@ services:
       echo 'Kafka topics initialized successfully'
       "
 
+  telemetry-producer:
+    build:
+      context: ./producers
+    container_name: ride-telemetry-producer
+    restart: unless-stopped
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TELEMETRY_TOPIC: ride_telemetry
+      TELEMETRY_INTERVAL_SECONDS: ${TELEMETRY_INTERVAL_SECONDS:-3}
+      SIMULATED_DAY_MINUTES: ${SIMULATED_DAY_MINUTES:-5}
+      SIMULATION_START_DATE: ${SIMULATION_START_DATE:-2026-09-28T00:00:00+00:00}
+      LONG_IDLE_PROBABILITY: ${LONG_IDLE_PROBABILITY:-0.02}
+
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
 
   spark:
     build:

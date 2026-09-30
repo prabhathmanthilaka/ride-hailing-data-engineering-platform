@@ -1,0 +1,5 @@
+# Test dependencies (plain Python; the Spark tests run inside the Spark image)
+-r api/requirements.txt
+-r producers/requirements.txt
+pytest==8.3.4
+httpx==0.28.1
