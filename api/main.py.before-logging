@@ -1,12 +1,9 @@
-import json
 import os
-import sys
 from datetime import datetime, timezone
 from time import perf_counter
 
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -23,33 +20,6 @@ app = FastAPI(
     description="Serving API for real-time fleet utilization, earnings, profitability and alerts.",
     version="1.0.0",
 )
-
-
-# ============================================================
-# STRUCTURED LOGGING
-# ============================================================
-
-SERVICE = "ride-api"
-
-# /metrics is scraped every 5 s; only log it when it is slow or fails.
-SLOW_REQUEST_MS = 2000
-
-
-def log_event(event, level="INFO", stage="serving", **fields):
-    """One structured JSON log record per line on stdout (docker logs)."""
-
-    record = {
-        "ts": datetime.now(timezone.utc).isoformat(
-            timespec="milliseconds"
-        ).replace("+00:00", "Z"),
-        "level": level,
-        "service": SERVICE,
-        "stage": stage,
-        "event": event,
-        **fields,
-    }
-
-    print(json.dumps(record, default=str), file=sys.stdout, flush=True)
 
 
 # ============================================================
@@ -309,40 +279,10 @@ VEHICLE_IDLE_SQL = """
 async def prometheus_middleware(request: Request, call_next):
     start_time = perf_counter()
 
-    try:
-        response = await call_next(request)
-
-    except Exception as exc:
-        log_event(
-            "http_request_failed",
-            level="ERROR",
-            method=request.method,
-            path=request.url.path,
-            duration_ms=round((perf_counter() - start_time) * 1000, 1),
-            error=str(exc),
-        )
-
-        raise
+    response = await call_next(request)
 
     duration = perf_counter() - start_time
     endpoint = request.url.path
-    duration_ms = round(duration * 1000, 1)
-
-    if (
-        endpoint != "/metrics"
-        or response.status_code >= 500
-        or duration_ms > SLOW_REQUEST_MS
-    ):
-        log_event(
-            "http_request",
-            level="ERROR" if response.status_code >= 500 else "INFO",
-            method=request.method,
-            path=endpoint,
-            query=str(request.url.query) or None,
-            status=response.status_code,
-            duration_ms=duration_ms,
-            slow=duration_ms > SLOW_REQUEST_MS,
-        )
 
     API_REQUESTS_TOTAL.labels(
         method=request.method,
@@ -387,37 +327,8 @@ def initialize_health_metrics():
 
         DATABASE_HEALTH_STATUS.set(1)
 
-        log_event(
-            "api_started",
-            database="healthy",
-        )
-
-    except Exception as exc:
+    except Exception:
         DATABASE_HEALTH_STATUS.set(0)
-
-        log_event(
-            "api_started",
-            level="ERROR",
-            database="unavailable",
-            error=str(exc),
-        )
-
-
-@app.exception_handler(HTTPException)
-async def log_http_exception(request: Request, exc: HTTPException):
-    """Log the reason behind every 5xx response before returning it."""
-
-    if exc.status_code >= 500:
-        log_event(
-            "request_error",
-            level="ERROR",
-            method=request.method,
-            path=request.url.path,
-            status=exc.status_code,
-            detail=exc.detail,
-        )
-
-    return await http_exception_handler(request, exc)
 
 
 # ============================================================
@@ -509,11 +420,8 @@ def update_fleet_prometheus_metrics():
             ).set(row[4] or 0)
 
     except Exception as exc:
-        log_event(
-            "metrics_refresh_failed",
-            level="ERROR",
-            metric_group="fleet",
-            error=str(exc),
+        print(
+            f"FLEET_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -572,11 +480,8 @@ def update_earnings_prometheus_metrics():
             ).set(float(earnings or 0))
 
     except Exception as exc:
-        log_event(
-            "metrics_refresh_failed",
-            level="ERROR",
-            metric_group="earnings",
-            error=str(exc),
+        print(
+            f"EARNINGS_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -684,11 +589,8 @@ def update_profitability_prometheus_metrics():
             )
 
     except Exception as exc:
-        log_event(
-            "metrics_refresh_failed",
-            level="ERROR",
-            metric_group="profitability",
-            error=str(exc),
+        print(
+            f"PROFITABILITY_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -735,11 +637,8 @@ def update_idle_prometheus_metrics():
         VEHICLES_IDLE_TOO_LONG.set(too_long)
 
     except Exception as exc:
-        log_event(
-            "metrics_refresh_failed",
-            level="ERROR",
-            metric_group="idle",
-            error=str(exc),
+        print(
+            f"IDLE_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:
@@ -803,11 +702,8 @@ def update_freshness_prometheus_metrics():
         )
 
     except Exception as exc:
-        log_event(
-            "metrics_refresh_failed",
-            level="ERROR",
-            metric_group="freshness",
-            error=str(exc),
+        print(
+            f"FRESHNESS_METRICS_UPDATE_ERROR error={exc}"
         )
 
     finally:

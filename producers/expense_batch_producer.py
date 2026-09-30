@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
+from producers.log_utils import log_event
 from producers.simulation_clock import SimulationClock
 
 
@@ -229,51 +230,35 @@ def publish_to_kafka(
 
 def main():
 
-    print("=" * 70)
-
-    print(
-        "Ride-Hailing Daily Expense Batch Producer"
-    )
-
-    print("=" * 70)
+    service = "expense-producer"
 
     clock = SimulationClock()
 
-    print(
-        f"Kafka: {BOOTSTRAP_SERVERS}"
-    )
-
-    print(
-        f"Topic: {TOPIC}"
-    )
-
-    print(
-        f"Vehicles: {VEHICLE_COUNT}"
-    )
-
-    print(
-        f"Simulated now: "
-        f"{clock.now().isoformat()}"
-    )
-
-    print(
-        f"Expense date (yesterday): "
-        f"{clock.previous_date().isoformat()}"
-    )
-
-    print("=" * 70)
-
     records = generate_expense_records(
         clock=clock
+    )
+
+    log_event(
+        service,
+        "ingestion",
+        "expense_batch_generated",
+        kafka=BOOTSTRAP_SERVERS,
+        topic=TOPIC,
+        simulated_now=clock.now().isoformat(),
+        expense_date=records[0]["expense_date"],
+        records=len(records),
     )
 
     csv_file = write_csv(
         records
     )
 
-    print(
-        f"Generated {len(records)} "
-        f"daily expense records."
+    log_event(
+        service,
+        "ingestion",
+        "expense_file_written",
+        path=str(csv_file),
+        records=len(records),
     )
 
     producer = create_producer()
@@ -285,19 +270,18 @@ def main():
             records,
         )
 
-        print(
-            f"Published {len(records)} "
-            f"records to Kafka topic "
-            f"'{TOPIC}'."
+        log_event(
+            service,
+            "ingestion",
+            "expenses_published",
+            topic=TOPIC,
+            expense_date=records[0]["expense_date"],
+            records=len(records),
         )
 
     finally:
 
         producer.close()
-
-    print(
-        f"CSV written to: {csv_file}"
-    )
 
 
 if __name__ == "__main__":

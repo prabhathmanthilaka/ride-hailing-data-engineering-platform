@@ -1,12 +1,7 @@
-import json
 import os
-import sys
-import time
-from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.streaming import StreamingQueryListener
 
 from schemas import TELEMETRY_SCHEMA, EXPENSE_SCHEMA
 from transformations import clean_telemetry, build_fleet_metrics
@@ -34,75 +29,6 @@ JDBC_PROPERTIES = {
 }
 
 
-SERVICE = "spark-streaming"
-
-
-def log_event(stage, event, level="INFO", **fields):
-    """One structured JSON log record per line on stdout (docker logs)."""
-
-    record = {
-        "ts": datetime.now(timezone.utc).isoformat(
-            timespec="milliseconds"
-        ).replace("+00:00", "Z"),
-        "level": level,
-        "service": SERVICE,
-        "stage": stage,
-        "event": event,
-        **fields,
-    }
-
-    print(json.dumps(record, default=str), file=sys.stdout, flush=True)
-
-
-class PipelineProgressListener(StreamingQueryListener):
-    """
-    Logs the lifecycle and per-micro-batch progress of every
-    streaming query: input rows, throughput, batch duration and
-    (for the windowed query) the event-time watermark.
-    """
-
-    def onQueryStarted(self, event):
-        log_event(
-            "processing",
-            "query_started",
-            query=event.name,
-            query_id=str(event.id),
-        )
-
-    def onQueryProgress(self, event):
-        progress = event.progress
-
-        # Skip idle heartbeats (no new data) to keep the log readable.
-        if progress.numInputRows == 0:
-            return
-
-        log_event(
-            "processing",
-            "query_progress",
-            query=progress.name,
-            batch_id=progress.batchId,
-            input_rows=progress.numInputRows,
-            input_rows_per_second=round(progress.inputRowsPerSecond, 2),
-            processed_rows_per_second=round(
-                progress.processedRowsPerSecond, 2
-            ),
-            batch_duration_ms=progress.durationMs.get("triggerExecution"),
-            watermark=progress.eventTime.get("watermark"),
-        )
-
-    def onQueryIdle(self, event):
-        pass
-
-    def onQueryTerminated(self, event):
-        log_event(
-            "processing",
-            "query_terminated",
-            level="ERROR" if event.exception else "INFO",
-            query_id=str(event.id),
-            error=event.exception,
-        )
-
-
 def write_to_postgres(table_name):
   
     def write_batch(batch_df, batch_id):
@@ -111,160 +37,28 @@ def write_to_postgres(table_name):
 
         row_count = batch_df.count()
 
-        started = time.perf_counter()
+        (
+            batch_df.write
+            .format("jdbc")
+            .mode("append")
+            .option("url", JDBC_URL)
+            .option("dbtable", table_name)
+            .option("user", POSTGRES_USER)
+            .option("password", POSTGRES_PASSWORD)
+            .option("driver", "org.postgresql.Driver")
+            .option("batchsize", 1000)
+            .option("isolationLevel", "READ_COMMITTED")
+            .save()
+        )
 
-        try:
-            (
-                batch_df.write
-                .format("jdbc")
-                .mode("append")
-                .option("url", JDBC_URL)
-                .option("dbtable", table_name)
-                .option("user", POSTGRES_USER)
-                .option("password", POSTGRES_PASSWORD)
-                .option("driver", "org.postgresql.Driver")
-                .option("batchsize", 1000)
-                .option("isolationLevel", "READ_COMMITTED")
-                .save()
-            )
-
-        except Exception as exc:
-            log_event(
-                "storage",
-                "postgres_write_failed",
-                level="ERROR",
-                table=table_name,
-                batch_id=batch_id,
-                rows=row_count,
-                error=str(exc).splitlines()[0],
-            )
-
-            raise
-
-        log_event(
-            "storage",
-            "postgres_write",
-            table=table_name,
-            batch_id=batch_id,
-            rows=row_count,
-            write_ms=round((time.perf_counter() - started) * 1000, 1),
+        print(
+            f"POSTGRES_WRITE "
+            f"table={table_name} "
+            f"batch_id={batch_id} "
+            f"rows={row_count}"
         )
 
     return write_batch
-
-
-FLEET_METRICS_KEY = ["window_start", "window_end", "zone", "time_of_day"]
-
-FLEET_METRICS_VALUES = [
-    "active_vehicles",
-    "idle_vehicles",
-    "enroute_vehicles",
-    "on_trip_vehicles",
-    "trips",
-    "earnings",
-]
-
-
-def write_fleet_metrics_to_postgres(batch_df, batch_id):
-    """
-    Idempotent sink for the windowed fleet metrics.
-
-    foreachBatch is at-least-once: after a restart Spark may replay a
-    micro-batch that was already written. A plain append then fails on
-    the fleet_metrics primary key and the query crashes on every
-    restart. Writing to a staging table and upserting with
-    ON CONFLICT DO UPDATE makes a replayed batch harmless.
-    """
-
-    if batch_df.isEmpty():
-        return
-
-    metrics_batch = batch_df.dropDuplicates(FLEET_METRICS_KEY)
-
-    row_count = metrics_batch.count()
-
-    staging_table = f"fleet_metrics_stage_{batch_id}"
-
-    started = time.perf_counter()
-
-    (
-        metrics_batch.write
-        .format("jdbc")
-        .mode("overwrite")
-        .option("url", JDBC_URL)
-        .option("dbtable", staging_table)
-        .option("user", POSTGRES_USER)
-        .option("password", POSTGRES_PASSWORD)
-        .option("driver", "org.postgresql.Driver")
-        .option("batchsize", 1000)
-        .save()
-    )
-
-    columns = ", ".join(FLEET_METRICS_KEY + FLEET_METRICS_VALUES)
-
-    updates = ", ".join(
-        f"{column} = EXCLUDED.{column}"
-        for column in FLEET_METRICS_VALUES
-    )
-
-    upsert_sql = f"""
-        INSERT INTO fleet_metrics ({columns})
-        SELECT {columns} FROM {staging_table}
-        ON CONFLICT ({", ".join(FLEET_METRICS_KEY)})
-        DO UPDATE SET {updates}
-    """
-
-    jvm = metrics_batch.sparkSession.sparkContext._jvm
-
-    properties = jvm.java.util.Properties()
-    properties.setProperty("user", POSTGRES_USER)
-    properties.setProperty("password", POSTGRES_PASSWORD)
-
-    connection = jvm.java.sql.DriverManager.getConnection(
-        JDBC_URL,
-        properties,
-    )
-
-    statement = None
-
-    try:
-        connection.setAutoCommit(False)
-
-        statement = connection.createStatement()
-        statement.executeUpdate(upsert_sql)
-        statement.executeUpdate(f"DROP TABLE IF EXISTS {staging_table}")
-
-        connection.commit()
-
-    except Exception as exc:
-        connection.rollback()
-
-        log_event(
-            "storage",
-            "postgres_upsert_failed",
-            level="ERROR",
-            table="fleet_metrics",
-            batch_id=batch_id,
-            rows=row_count,
-            error=str(exc).splitlines()[0],
-        )
-
-        raise
-
-    finally:
-        if statement is not None:
-            statement.close()
-
-        connection.close()
-
-    log_event(
-        "storage",
-        "postgres_upsert",
-        table="fleet_metrics",
-        batch_id=batch_id,
-        rows=row_count,
-        write_ms=round((time.perf_counter() - started) * 1000, 1),
-    )
 
 
 def write_expenses_to_postgres(batch_df, batch_id):
@@ -379,27 +173,16 @@ def write_expenses_to_postgres(batch_df, batch_id):
 
         connection.commit()
 
-        log_event(
-            "storage",
-            "postgres_upsert",
-            table="vehicle_expenses",
-            batch_id=batch_id,
-            rows=row_count,
+        print(
+            f"POSTGRES_UPSERT "
+            f"table=vehicle_expenses "
+            f"batch_id={batch_id} "
+            f"rows={row_count}"
         )
 
-    except Exception as exc:
+    except Exception:
         if connection is not None:
             connection.rollback()
-
-        log_event(
-            "storage",
-            "postgres_upsert_failed",
-            level="ERROR",
-            table="vehicle_expenses",
-            batch_id=batch_id,
-            rows=row_count,
-            error=str(exc).splitlines()[0],
-        )
 
         raise
 
@@ -449,16 +232,6 @@ def main():
     )
 
     spark.sparkContext.setLogLevel("WARN")
-
-    spark.streams.addListener(PipelineProgressListener())
-
-    log_event(
-        "processing",
-        "streaming_job_started",
-        kafka=KAFKA_BOOTSTRAP,
-        postgres=f"{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}",
-        spark_version=spark.version,
-    )
 
     
     # STREAM 1: REAL-TIME TELEMETRY
@@ -531,7 +304,9 @@ def main():
         metrics.writeStream
         .outputMode("append")
         .foreachBatch(
-            write_fleet_metrics_to_postgres
+            write_to_postgres(
+                "fleet_metrics"
+            )
         )
         .option(
             "checkpointLocation",

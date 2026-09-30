@@ -15,12 +15,6 @@ PROJECT_ROOT = Path("/opt/project")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from producers.log_utils import log_event  # noqa: E402
-
-
-SERVICE = "expense-pipeline"
-STAGE = "orchestration"
-
 
 RECONCILE_SQL = (
     PROJECT_ROOT
@@ -89,13 +83,6 @@ def generate_daily_expenses(**context):
     # During the first simulated day there is no completed day yet.
     # Skipping here also skips every downstream task of this run.
     if clock.previous_date() < SIMULATION_START_DATE.date():
-        log_event(
-            SERVICE,
-            STAGE,
-            "run_skipped_no_completed_day",
-            simulated_now=clock.now().isoformat(),
-        )
-
         raise AirflowSkipException(
             f"No completed simulated day yet "
             f"(simulated now={clock.now().isoformat()})."
@@ -105,17 +92,11 @@ def generate_daily_expenses(**context):
         clock=clock
     )
 
-    log_event(
-        SERVICE,
-        "ingestion",
-        "expense_batch_generated",
-        simulated_now=clock.now().isoformat(),
-        expense_date=records[0]["expense_date"],
-        records=len(records),
-        service_required=sum(
-            record["service_flag"] == "SERVICE_REQUIRED"
-            for record in records
-        ),
+    print(
+        f"EXPENSE_BATCH_GENERATED "
+        f"simulated_now={clock.now().isoformat()} "
+        f"expense_date={records[0]['expense_date']} "
+        f"records={len(records)}"
     )
 
     return records
@@ -139,12 +120,10 @@ def write_daily_expenses_to_csv(**context):
 
     csv_file = write_csv(records)
 
-    log_event(
-        SERVICE,
-        "ingestion",
-        "expense_file_written",
-        path=str(csv_file),
-        records=len(records),
+    print(
+        f"EXPENSE_FILE_WRITTEN "
+        f"path={csv_file} "
+        f"records={len(records)}"
     )
 
 
@@ -173,13 +152,11 @@ def publish_daily_expenses_to_kafka(**context):
             records,
         )
 
-        log_event(
-            SERVICE,
-            "ingestion",
-            "expenses_published",
-            topic="vehicle_expenses",
-            expense_date=records[0]["expense_date"],
-            records=len(records),
+        print(
+            f"EXPENSES_PUBLISHED "
+            f"topic=vehicle_expenses "
+            f"expense_date={records[0]['expense_date']} "
+            f"records={len(records)}"
         )
 
     finally:
@@ -209,14 +186,11 @@ def expenses_landed_in_postgres(**context) -> bool:
     finally:
         conn.close()
 
-    log_event(
-        SERVICE,
-        "storage",
-        "expenses_landed_check",
-        expense_date=report_date,
-        landed=landed,
-        expected=VEHICLE_COUNT,
-        complete=landed >= VEHICLE_COUNT,
+    print(
+        f"EXPENSES_LANDED_CHECK "
+        f"expense_date={report_date} "
+        f"landed={landed} "
+        f"expected={VEHICLE_COUNT}"
     )
 
     return landed >= VEHICLE_COUNT
@@ -263,13 +237,11 @@ def reconcile_vehicle_profitability(**context):
     finally:
         conn.close()
 
-    log_event(
-        SERVICE,
-        "processing",
-        "profitability_reconciled",
-        report_date=report_date,
-        rows=upserted,
-        status_counts=summary,
+    print(
+        f"PROFITABILITY_RECONCILED "
+        f"report_date={report_date} "
+        f"rows={upserted} "
+        f"summary={summary}"
     )
 
 
@@ -337,14 +309,11 @@ def export_daily_profitability_report(**context):
         if row[-1] == "UNPROFITABLE"
     ]
 
-    log_event(
-        SERVICE,
-        "serving",
-        "profitability_report_exported",
-        path=str(report_file),
-        report_date=report_date,
-        vehicles=len(rows),
-        unprofitable=unprofitable,
+    print(
+        f"PROFITABILITY_REPORT_EXPORTED "
+        f"path={report_file} "
+        f"vehicles={len(rows)} "
+        f"unprofitable={unprofitable}"
     )
 
 
@@ -352,30 +321,11 @@ def export_daily_profitability_report(**context):
 # DAG
 # ============================================================
 
-def log_task_failure(context):
-    """Airflow failure callback: one structured ERROR record per failed task."""
-
-    task_instance = context["task_instance"]
-
-    log_event(
-        SERVICE,
-        STAGE,
-        "task_failed",
-        level="ERROR",
-        dag_id=task_instance.dag_id,
-        task_id=task_instance.task_id,
-        run_id=task_instance.run_id,
-        try_number=task_instance.try_number,
-        error=str(context.get("exception")),
-    )
-
-
 default_args = {
     "owner": "ride-hailing-data-engineering",
     "depends_on_past": False,
     "retries": 2,
     "retry_delay": timedelta(seconds=30),
-    "on_failure_callback": log_task_failure,
 }
 
 
