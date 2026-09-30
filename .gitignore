@@ -53,3 +53,6 @@ temp/
 
 # Jupyter
 .ipynb_checkpoints/
+# Local backup copies
+*.before-*
+*.backup
